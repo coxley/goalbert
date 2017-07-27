@@ -1,3 +1,10 @@
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+/*
+	Package goalbert implements the Albert Communication Protocol
+*/
 package goalbert
 
 import (
@@ -12,14 +19,14 @@ import (
 // Albert Communication Protocol version we support
 const protocolVersion = "org.albert.extension.external/v2.0"
 
-var pluginMetadata = Metadata{}
+var pluginMetadata = Metadata{IID: protocolVersion}
 var defaultHookSet = HookSet{
 	Metadata:        defaultMetadata,
 	Name:            func() int { fmt.Print(pluginMetadata.Name); return 0 },
 	Initialize:      func() int { return 0 },
 	Finalize:        func() int { return 0 },
-	Setupsession:    func() int { return 0 },
-	Teardownsession: func() int { return 0 },
+	SetupSession:    func() int { return 0 },
+	TeardownSession: func() int { return 0 },
 	Query: func(query string) (result QueryResult, code int) {
 		glog.Warning("Must implement Query behavior")
 		return QueryResult{}, 255
@@ -33,8 +40,8 @@ type HookSet struct {
 	Name            func() (code int)
 	Initialize      func() (code int)
 	Finalize        func() (code int)
-	Setupsession    func() (code int)
-	Teardownsession func() (code int)
+	SetupSession    func() (code int)
+	TeardownSession func() (code int)
 	Query           func(query string) (result QueryResult, code int)
 }
 
@@ -54,7 +61,7 @@ func (h *HookSet) Start() {
 			if fn := h.Name; fn != nil {
 				os.Exit(fn())
 			} else {
-				os.Exit(defaultHookSet.Metadata())
+				os.Exit(defaultHookSet.Name())
 			}
 		}
 	case "INITIALIZE":
@@ -62,7 +69,7 @@ func (h *HookSet) Start() {
 			if fn := h.Initialize; fn != nil {
 				os.Exit(fn())
 			} else {
-				os.Exit(defaultHookSet.Metadata())
+				os.Exit(defaultHookSet.Initialize())
 			}
 		}
 	case "FINALIZE":
@@ -70,32 +77,34 @@ func (h *HookSet) Start() {
 			if fn := h.Finalize; fn != nil {
 				os.Exit(fn())
 			} else {
-				os.Exit(defaultHookSet.Metadata())
+				os.Exit(defaultHookSet.Finalize())
 			}
 		}
 	case "SETUPSESSION":
 		{
-			if fn := h.Setupsession; fn != nil {
+			if fn := h.SetupSession; fn != nil {
 				os.Exit(fn())
 			} else {
-				os.Exit(defaultHookSet.Metadata())
+				os.Exit(defaultHookSet.SetupSession())
 			}
 		}
 	case "TEARDOWNSESSION":
 		{
-			if fn := h.Teardownsession; fn != nil {
+			if fn := h.TeardownSession; fn != nil {
 				os.Exit(fn())
 			} else {
-				os.Exit(defaultHookSet.Metadata())
+				os.Exit(defaultHookSet.TeardownSession())
 			}
 		}
 	case "QUERY":
 		{
+			query := os.Getenv("ALBERT_QUERY")
 			if fn := h.Query; fn != nil {
-				os.Exit(fn())
+				handleQueryResult(fn(query))
 			} else {
-				os.Exit(defaultHookSet.Metadata())
+				handleQueryResult(defaultHookSet.Query(query))
 			}
+
 		}
 	}
 }
@@ -137,7 +146,7 @@ type Metadata struct {
 
 // NewQueryAction returns an action given a name and exec.Cmd
 func NewQueryAction(name string, cmd *exec.Cmd) QueryAction {
-	return QueryAction{Name: name, Command: cmd.Path, Arguments: cmd.Args}
+	return QueryAction{Name: name, Command: cmd.Path, Arguments: cmd.Args[1:]}
 }
 
 // SetInfo can be used to set basic information about your plugin
@@ -169,4 +178,14 @@ func defaultMetadata() int {
 	js, _ := json.Marshal(pluginMetadata)
 	fmt.Print(string(js))
 	return 0
+}
+
+func handleQueryResult(res QueryResult, code int) {
+	js, err := json.Marshal(res)
+	if err != nil {
+		glog.Warning(err)
+		os.Exit(255)
+	}
+	fmt.Print(string(js))
+	os.Exit(code)
 }
