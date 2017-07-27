@@ -3,7 +3,36 @@
 // license that can be found in the LICENSE file.
 
 /*
-	Package goalbert implements the Albert Communication Protocol
+Package goalbert implements the Albert Communication Protocol
+
+For full information about how Albert will interact with your program, see
+the documentation here: https://albertlauncher.github.io/docs/extending/external/#communication-protocol-v2
+
+Simplest example of setup:
+	package main
+	import albert "github.com/coxley/goalbert"
+
+	const trigger = "myplugin"
+
+	func main() {
+		albert.SetInfo("My Plugin", "0.1", "Codey Oxley")
+		albert.SetTrigger(trigger)
+
+		// If deps
+		albert.SetDependencies([]string{"dep1"})
+
+		hs := albert.HookSet{Query: queryHandler}
+		hs.Start()
+		// If code reaches this point, that means the albert communication
+		// protocol isn't involve here.
+		//
+		// If you want your program to handle other things such as CLI
+		// usage you could do that here
+	}
+
+	func queryHandler(q string) (albert.QueryResult, int) {
+		// ...
+	}
 */
 package goalbert
 
