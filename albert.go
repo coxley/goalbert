@@ -9,29 +9,35 @@ For full information about how Albert will interact with your program, see
 the documentation here: https://albertlauncher.github.io/docs/extending/external/#communication-protocol-v2
 
 Simplest example of setup:
+
 	package main
-	import albert "github.com/coxley/goalbert"
 
-	const trigger = "myplugin"
+	import (
+		"os"
+		"strings"
+	)
 
-	func main() {
-		albert.SetInfo("My Plugin", "0.1", "Codey Oxley")
-		albert.SetTrigger(trigger)
+	const name = "plugin_name"
+	const version = "0.1"
+	const trigger = "mytrigger"
+	const author = "coxley"
 
-		// If deps
-		albert.SetDependencies([]string{"dep1"})
-
-		hs := albert.HookSet{Query: queryHandler}
-		hs.Start()
-		// If code reaches this point, that means the albert communication
-		// protocol isn't involve here.
-		//
-		// If you want your program to handle other things such as CLI
-		// usage you could do that here
+	func query(q string) (albert.QueryResult, error) {
+		// Strip the trigger if it's there from the query string
+		q = strings.Replace(q, trigger+" ", "", 1)
+		item := albert.QueryItem{
+		// ...
+		}
+		return albert.QueryResult{Items: []albert.QueryItem{item}}, nil
 	}
 
-	func queryHandler(q string) (albert.QueryResult, int) {
-		// ...
+	func main() {
+		p := albert.NewPlugin(name, version, author, trigger, query)
+
+		// If called by Albert, run and exit based on Albert protocol
+		if os.Getenv("ALBERT_OP") != "" {
+			albert.Run(p)
+		}
 	}
 */
 package goalbert
@@ -39,6 +45,7 @@ package goalbert
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 
@@ -46,96 +53,32 @@ import (
 )
 
 // Albert Communication Protocol version we support
-const protocolVersion = "org.albert.extension.external/v2.0"
+const defaultProtocolVersion = "org.albert.extension.external/v2.0"
 
-var pluginMetadata = Metadata{IID: protocolVersion}
-var defaultHookSet = HookSet{
-	Metadata:        defaultMetadata,
-	Name:            func() int { fmt.Print(pluginMetadata.Name); return 0 },
-	Initialize:      func() int { return 0 },
-	Finalize:        func() int { return 0 },
-	SetupSession:    func() int { return 0 },
-	TeardownSession: func() int { return 0 },
-	Query: func(query string) (result QueryResult, code int) {
-		glog.Warning("Must implement Query behavior")
-		return QueryResult{}, 255
-	},
+// AlbertOp is an operation requested by Albert at some point during the
+// process
+type AlbertOp string
+
+// The operations as of defaultProtocolVersion
+const (
+	OpMetadata        AlbertOp = "METADATA"
+	OpName            AlbertOp = "NAME"
+	OpInitialize      AlbertOp = "INITIALIZE"
+	OpFinalize        AlbertOp = "FINALIZE"
+	OpSetupSession    AlbertOp = "SETUPSESSION"
+	OpTeardownSession AlbertOp = "TEARDOWNSESSION"
+	OpQuery           AlbertOp = "QUERY"
+)
+
+// AlbertError is an error thrown from an AlbertOp implementation containing
+// both the error and exit-code to exit with
+type AlbertError struct {
+	Err  error
+	Code int
 }
 
-// HookSet represents a set of callbacks to run in different stages of the
-// interaction between Albert and the plugin
-type HookSet struct {
-	Metadata        func() (code int)
-	Name            func() (code int)
-	Initialize      func() (code int)
-	Finalize        func() (code int)
-	SetupSession    func() (code int)
-	TeardownSession func() (code int)
-	Query           func(query string) (result QueryResult, code int)
-}
-
-// Start initiates the Albert Communication Protocol
-func (h *HookSet) Start() {
-	switch op := os.Getenv("ALBERT_OP"); op {
-	case "METADATA":
-		{
-			if fn := h.Metadata; fn != nil {
-				os.Exit(fn())
-			} else {
-				os.Exit(defaultHookSet.Metadata())
-			}
-		}
-	case "NAME":
-		{
-			if fn := h.Name; fn != nil {
-				os.Exit(fn())
-			} else {
-				os.Exit(defaultHookSet.Name())
-			}
-		}
-	case "INITIALIZE":
-		{
-			if fn := h.Initialize; fn != nil {
-				os.Exit(fn())
-			} else {
-				os.Exit(defaultHookSet.Initialize())
-			}
-		}
-	case "FINALIZE":
-		{
-			if fn := h.Finalize; fn != nil {
-				os.Exit(fn())
-			} else {
-				os.Exit(defaultHookSet.Finalize())
-			}
-		}
-	case "SETUPSESSION":
-		{
-			if fn := h.SetupSession; fn != nil {
-				os.Exit(fn())
-			} else {
-				os.Exit(defaultHookSet.SetupSession())
-			}
-		}
-	case "TEARDOWNSESSION":
-		{
-			if fn := h.TeardownSession; fn != nil {
-				os.Exit(fn())
-			} else {
-				os.Exit(defaultHookSet.TeardownSession())
-			}
-		}
-	case "QUERY":
-		{
-			query := os.Getenv("ALBERT_QUERY")
-			if fn := h.Query; fn != nil {
-				handleQueryResult(fn(query))
-			} else {
-				handleQueryResult(defaultHookSet.Query(query))
-			}
-
-		}
-	}
+func (e AlbertError) Error() string {
+	return e.Err.Error()
 }
 
 // QueryResult is the collection of QueryItem that is output to Albert every
@@ -163,6 +106,11 @@ type QueryAction struct {
 	Arguments []string `json:"arguments"`
 }
 
+// NewQueryAction returns an action given a name and exec.Cmd
+func NewQueryAction(name string, cmd *exec.Cmd) QueryAction {
+	return QueryAction{Name: name, Command: cmd.Path, Arguments: cmd.Args[1:]}
+}
+
 // Metadata represents the information used to describe your plugin to Albert
 type Metadata struct {
 	IID          string   `json:"iid"`
@@ -173,48 +121,112 @@ type Metadata struct {
 	Trigger      string   `json:"trigger"`
 }
 
-// NewQueryAction returns an action given a name and exec.Cmd
-func NewQueryAction(name string, cmd *exec.Cmd) QueryAction {
-	return QueryAction{Name: name, Command: cmd.Path, Arguments: cmd.Args[1:]}
+// Plugin is the primary interface for implementing Albert compatible plugins.
+type Plugin interface {
+	Metadata() Metadata
+	Query(query string) (QueryResult, error)
+	RunOp(op AlbertOp) error
 }
 
-// SetInfo can be used to set basic information about your plugin
-func SetInfo(name, version, author string) {
-	pluginMetadata.Name = name
-	pluginMetadata.Version = version
-	pluginMetadata.Author = author
-}
-
-// SetTrigger sets the trigger for users to type into Albert to signal desire
-// to use your plugin
-func SetTrigger(trigger string) {
-	pluginMetadata.Trigger = trigger
-}
-
-// SetDependencies sets the dependencies needed to run your plugin
-func SetDependencies(deps []string) {
-	pluginMetadata.Dependencies = deps
-}
-
-// SetMetadata can be used to directly set the plugin metadata from
-// pre-constructed struct if that is preferred over using SetInfo, SetTrigger,
-// and SetDependencies
-func SetMetadata(m *Metadata) {
-	pluginMetadata = *m
-}
-
-func defaultMetadata() int {
-	js, _ := json.Marshal(pluginMetadata)
-	fmt.Print(string(js))
-	return 0
-}
-
-func handleQueryResult(res QueryResult, code int) {
-	js, err := json.Marshal(res)
+// Run the given Plugin with the appropriate operation and exit accordingly
+func Run(plugin Plugin) {
+	op := AlbertOp(os.Getenv("ALBERT_OP"))
+	err := plugin.RunOp(op)
 	if err != nil {
-		glog.Warning(err)
+		if aberr, ok := err.(AlbertError); ok {
+			glog.Warningf("error (code=%d): %+v", aberr.Code, aberr)
+			os.Exit(aberr.Code)
+		}
+		glog.Warningf("error: %+v", err)
 		os.Exit(255)
 	}
-	fmt.Print(string(js))
-	os.Exit(code)
+	os.Exit(0)
+}
+
+// DefaultPlugin is a default implementation of Plugin that can be embed for
+// minimum rewriting sane behavior
+//
+// Meta describes the plugin
+// Output is a Writer where JSON should be written to
+type DefaultPlugin struct {
+	Meta          Metadata
+	Output        io.Writer
+	QueryCallback func(query string) (QueryResult, error)
+}
+
+// NewPlugin configures a DefaultPlugin
+func NewPlugin(name, version, author, trigger string, qc func(query string) (QueryResult, error)) DefaultPlugin {
+	return DefaultPlugin{
+		Meta: Metadata{
+			IID:          defaultProtocolVersion,
+			Name:         name,
+			Version:      version,
+			Author:       author,
+			Trigger:      trigger,
+			Dependencies: []string{},
+		},
+		Output:        os.Stdout,
+		QueryCallback: qc,
+	}
+}
+
+// Metadata returns a copy of the plugin's metadata
+func (p DefaultPlugin) Metadata() Metadata {
+	return p.Meta
+}
+
+// Query is one place where no sane default could exist. This must be
+// implemented by you via the QueryCallback middleman
+//
+// query is a string that is input by the user into Albert and may inlude the
+// trigger as part of the query
+func (p DefaultPlugin) Query(query string) (QueryResult, error) {
+	if p.QueryCallback != nil {
+		return p.QueryCallback(query)
+	}
+	return QueryResult{}, AlbertError{
+		Err:  fmt.Errorf("no behavior defined for query '%s'", query),
+		Code: 255,
+	}
+}
+
+// RunOp is to take any of operation and run, returning error if any, and
+// writing to p.Output when appropriate
+func (p DefaultPlugin) RunOp(op AlbertOp) error {
+	switch op {
+	case OpMetadata:
+		err := json.NewEncoder(p.Output).Encode(p.Metadata())
+		if err != nil {
+			return err
+		}
+		return nil
+	case OpName:
+		_, err := p.Output.Write([]byte(p.Meta.Name))
+		return err
+	case OpInitialize:
+		return nil
+	case OpFinalize:
+		return nil
+	case OpSetupSession:
+		return nil
+	case OpTeardownSession:
+		return nil
+	case OpQuery:
+		query := os.Getenv("ALBERT_QUERY")
+		res, err := p.Query(query)
+		if err != nil {
+			return err
+		}
+
+		err = json.NewEncoder(p.Output).Encode(res)
+		if err != nil {
+			return err
+		}
+		return nil
+	default:
+		return AlbertError{
+			Err:  fmt.Errorf("unknown albert op '%s'", op),
+			Code: 255,
+		}
+	}
 }
